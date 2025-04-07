@@ -126,6 +126,10 @@ impl AggregateUDFImpl for Sum {
         &self.signature
     }
 
+    fn is_linear(&self) -> bool {
+        true
+    }
+
     fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
         let [args] = take_function_args(self.name(), arg_types)?;
 

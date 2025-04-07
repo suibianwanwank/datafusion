@@ -201,6 +201,10 @@ impl AggregateUDFImpl for Count {
         false
     }
 
+    fn is_linear(&self) -> bool {
+        true
+    }
+
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<Field>> {
         if args.is_distinct {
             Ok(vec![Field::new_list(

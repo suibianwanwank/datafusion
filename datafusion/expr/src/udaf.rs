@@ -205,6 +205,10 @@ impl AggregateUDF {
         self.inner.is_nullable()
     }
 
+    pub fn is_linear(&self) -> bool {
+        self.inner.is_linear()
+    }
+
     /// Returns the aliases for this function.
     pub fn aliases(&self) -> &[String] {
         self.inner.aliases()
@@ -658,6 +662,15 @@ pub trait AggregateUDFImpl: Debug + Send + Sync {
     /// Note that if the function is declared as *not* nullable, make sure the [`AggregateUDFImpl::default_value`] is `non-null`
     fn is_nullable(&self) -> bool {
         true
+    }
+
+    /// Whether the aggregate function is linear.
+    ///
+    /// Linear functions satisfy: `f(a + b) = f(a) + f(b)`.
+    /// Common linear aggregate functions include `SUM`, `COUNT`, etc.
+    /// Non-linear functions like `MIN`, `MAX`, `AVG` do not meet this criterion.
+    fn is_linear(&self) -> bool {
+        false
     }
 
     /// Return a new [`Accumulator`] that aggregates values for a specific

@@ -124,6 +124,10 @@ impl AggregateUDFImpl for Sum {
         &self.signature
     }
 
+    fn is_linear(&self) -> bool {
+        true
+    }
+
     fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
         let [array] = take_function_args(self.name(), arg_types)?;
 
@@ -252,6 +256,10 @@ impl AggregateUDFImpl for Count {
 
     fn is_nullable(&self) -> bool {
         false
+    }
+
+    fn is_linear(&self) -> bool {
+        true
     }
 
     fn state_fields(&self, _args: StateFieldsArgs) -> Result<Vec<Field>> {
