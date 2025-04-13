@@ -388,32 +388,17 @@ impl WindowAggStream {
         &mut self,
         batch: &RecordBatch,
     ) -> Result<Option<RecordBatch>> {
-        // record compute time on drop
-        let _timer = self.baseline_metrics.elapsed_compute().timer();
+        if batch.num_rows() == 0 {
+            return Ok(None);
+        }
 
         let evaluate_batch = match &self.current_batch {
-            Some(
-
-                prev_batch) => {
-                let batches = vec![prev_batch, batch];
-                let expected_len = self.input.schema().fields().len();
-                if prev_batch.schema().fields().len() != expected_len ||
-                    batch.schema().fields().len() != expected_len {
-                    return Err(DataFusionError::Execution(format!(
-                        "Schema mismatch: expected {} fields, got {} in prev_batch and {} in current batch",
-                        expected_len,
-                        prev_batch.schema().fields().len(),
-                        batch.schema().fields().len()
-                    )));
-                }
-                concat_batches(&self.input.schema(), batches)?
-            }
-            None => {
-                batch.clone()
-            }
+            Some(prev_batch) => concat_batches(&self.input.schema(), vec![prev_batch, batch])?,
+            None => batch.clone()
         };
 
-        if batch.num_rows() == 0 {
+        if self.partition_by_sort_keys.is_empty() {
+            self.current_batch = Some(evaluate_batch);
             return Ok(None);
         }
 
