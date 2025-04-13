@@ -234,6 +234,27 @@ fn criterion_benchmark(c: &mut Criterion) {
             })
         },
     );
+
+    c.bench_function(
+        "window partition filter, sum over partition by u64_narrow",
+        |b| {
+            b.iter(|| {
+                query(
+                    ctx.clone(),
+                    &rt,
+                    "SELECT * \
+                 FROM ( \
+                     SELECT \
+                         u64_narrow, \
+                         f64, \
+                         SUM(f64) OVER (PARTITION BY u64_narrow) AS sum_f64 \
+                     FROM t \
+                 ) AS subq \
+                 WHERE sum_f64 > 25",
+                )
+            })
+        },
+    );
 }
 
 criterion_group!(benches, criterion_benchmark);

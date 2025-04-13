@@ -42,7 +42,7 @@ use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use datafusion_common::stats::Precision;
 use datafusion_common::utils::{evaluate_partition_ranges, transpose};
-use datafusion_common::{internal_err, Result};
+use datafusion_common::{DataFusionError, internal_err, Result};
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr_common::sort_expr::{LexOrdering, LexRequirement};
 
@@ -304,12 +304,12 @@ fn compute_window_aggregates(
 pub struct WindowAggStream {
     schema: SchemaRef,
     input: SendableRecordBatchStream,
-    batches: Vec<RecordBatch>,
     finished: bool,
     window_expr: Vec<Arc<dyn WindowExpr>>,
     partition_by_sort_keys: LexOrdering,
     baseline_metrics: BaselineMetrics,
     ordered_partition_by_indices: Vec<usize>,
+    current_batch: Option<RecordBatch>,
 }
 
 impl WindowAggStream {
@@ -326,23 +326,93 @@ impl WindowAggStream {
         if window_expr[0].partition_by().len() != ordered_partition_by_indices.len() {
             return internal_err!("All partition by columns should have an ordering");
         }
+
         Ok(Self {
             schema,
             input,
-            batches: vec![],
             finished: false,
             window_expr,
             baseline_metrics,
             partition_by_sort_keys,
             ordered_partition_by_indices,
+            current_batch: None,
         })
     }
 
-    fn compute_aggregates(&self) -> Result<Option<RecordBatch>> {
+    // fn compute_aggregates(&self) -> Result<Option<RecordBatch>> {
+    //     // record compute time on drop
+    //     let _timer = self.baseline_metrics.elapsed_compute().timer();
+    //
+    //     let batch = concat_batches(&self.input.schema(), &self.batches)?;
+    //     if batch.num_rows() == 0 {
+    //         return Ok(None);
+    //     }
+    //
+    //     let partition_by_sort_keys = self
+    //         .ordered_partition_by_indices
+    //         .iter()
+    //         .map(|idx| self.partition_by_sort_keys[*idx].evaluate_to_sort_column(&batch))
+    //         .collect::<Result<Vec<_>>>()?;
+    //     let partition_points =
+    //         evaluate_partition_ranges(batch.num_rows(), &partition_by_sort_keys)?;
+    //
+    //     let mut partition_results = vec![];
+    //     // Calculate window cols
+    //     for partition_point in partition_points {
+    //         let length = partition_point.end - partition_point.start;
+    //         partition_results.push(compute_window_aggregates(
+    //             &self.window_expr,
+    //             &batch.slice(partition_point.start, length),
+    //         )?)
+    //     }
+    //     let columns = transpose(partition_results)
+    //         .iter()
+    //         .map(|elems| concat(&elems.iter().map(|x| x.as_ref()).collect::<Vec<_>>()))
+    //         .collect::<Vec<_>>()
+    //         .into_iter()
+    //         .collect::<Result<Vec<ArrayRef>, ArrowError>>()?;
+    //
+    //     // combine with the original cols
+    //     // note the setup of window aggregates is that they newly calculated window
+    //     // expression results are always appended to the columns
+    //     let mut batch_columns = batch.columns().to_vec();
+    //     // calculate window cols
+    //     batch_columns.extend_from_slice(&columns);
+    //     Ok(Some(RecordBatch::try_new(
+    //         Arc::clone(&self.schema),
+    //         batch_columns,
+    //     )?))
+    // }
+
+    fn stream_compute_aggregates(
+        &mut self,
+        batch: &RecordBatch,
+    ) -> Result<Option<RecordBatch>> {
         // record compute time on drop
         let _timer = self.baseline_metrics.elapsed_compute().timer();
 
-        let batch = concat_batches(&self.input.schema(), &self.batches)?;
+        let evaluate_batch = match &self.current_batch {
+            Some(
+
+                prev_batch) => {
+                let batches = vec![prev_batch, batch];
+                let expected_len = self.input.schema().fields().len();
+                if prev_batch.schema().fields().len() != expected_len ||
+                    batch.schema().fields().len() != expected_len {
+                    return Err(DataFusionError::Execution(format!(
+                        "Schema mismatch: expected {} fields, got {} in prev_batch and {} in current batch",
+                        expected_len,
+                        prev_batch.schema().fields().len(),
+                        batch.schema().fields().len()
+                    )));
+                }
+                concat_batches(&self.input.schema(), batches)?
+            }
+            None => {
+                batch.clone()
+            }
+        };
+
         if batch.num_rows() == 0 {
             return Ok(None);
         }
@@ -350,37 +420,76 @@ impl WindowAggStream {
         let partition_by_sort_keys = self
             .ordered_partition_by_indices
             .iter()
-            .map(|idx| self.partition_by_sort_keys[*idx].evaluate_to_sort_column(&batch))
+            .map(|idx| {
+                self.partition_by_sort_keys[*idx].evaluate_to_sort_column(&evaluate_batch)
+            })
             .collect::<Result<Vec<_>>>()?;
-        let partition_points =
-            evaluate_partition_ranges(batch.num_rows(), &partition_by_sort_keys)?;
+        let partition_points = evaluate_partition_ranges(
+            evaluate_batch.num_rows(),
+            &partition_by_sort_keys,
+        )?;
+
+        if partition_points.len() <= 1 {
+            self.current_batch = Some(evaluate_batch);
+            return Ok(None);
+        }
+
+        let last = partition_points.last().unwrap();
+        self.current_batch = Some(evaluate_batch.slice(last.start, last.end - last.start));
 
         let mut partition_results = vec![];
         // Calculate window cols
-        for partition_point in partition_points {
+        for partition_point in partition_points
+            .iter()
+            .take(partition_points.len().saturating_sub(1))
+        {
             let length = partition_point.end - partition_point.start;
             partition_results.push(compute_window_aggregates(
                 &self.window_expr,
-                &batch.slice(partition_point.start, length),
+                &evaluate_batch.slice(partition_point.start, length),
             )?)
         }
+
         let columns = transpose(partition_results)
             .iter()
             .map(|elems| concat(&elems.iter().map(|x| x.as_ref()).collect::<Vec<_>>()))
             .collect::<Vec<_>>()
             .into_iter()
             .collect::<Result<Vec<ArrayRef>, ArrowError>>()?;
-
         // combine with the original cols
         // note the setup of window aggregates is that they newly calculated window
         // expression results are always appended to the columns
-        let mut batch_columns = batch.columns().to_vec();
+        let mut batch_columns = evaluate_batch.slice(0, last. start).columns().to_vec();
         // calculate window cols
         batch_columns.extend_from_slice(&columns);
-        Ok(Some(RecordBatch::try_new(
-            Arc::clone(&self.schema),
-            batch_columns,
-        )?))
+        let result = RecordBatch::try_new(Arc::clone(&self.schema), batch_columns)?;
+        Ok(Some(result))
+    }
+
+    fn reduce_batches(&mut self) -> Result<Option<Result<RecordBatch>>> {
+        if let Some(batch) = &self.current_batch {
+
+            let partition_results = vec![compute_window_aggregates(&self.window_expr, batch)?];
+
+            let columns = transpose(partition_results)
+                .iter()
+                .map(|elems| concat(&elems.iter().map(|x| x.as_ref()).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect::<Result<Vec<ArrayRef>, ArrowError>>()?;
+
+            // combine with the original cols
+            // note the setup of window aggregates is that they newly calculated window
+            // expression results are always appended to the columns
+            let mut batch_columns = batch.columns().to_vec();
+            // calculate window cols
+            batch_columns.extend_from_slice(&columns);
+            let new_batch = RecordBatch::try_new(Arc::clone(&self.schema), batch_columns)?;
+
+            Ok(Some(Ok(new_batch)))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -402,26 +511,22 @@ impl WindowAggStream {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<RecordBatch>>> {
-        if self.finished {
-            return Poll::Ready(None);
-        }
-
         loop {
+            if self.finished {
+                return Poll::Ready(None);
+            }
             return Poll::Ready(Some(match ready!(self.input.poll_next_unpin(cx)) {
                 Some(Ok(batch)) => {
-                    self.batches.push(batch);
+                    let result = self.stream_compute_aggregates(&batch)?;
+                    if let Some(rb) = result {
+                        return Poll::Ready(Some(Ok(rb)));
+                    }
                     continue;
                 }
                 Some(Err(e)) => Err(e),
                 None => {
-                    let Some(result) = self.compute_aggregates()? else {
-                        return Poll::Ready(None);
-                    };
                     self.finished = true;
-                    // Empty record batches should not be emitted.
-                    // They need to be treated as  [`Option<RecordBatch>`]es and handled separately
-                    debug_assert!(result.num_rows() > 0);
-                    Ok(result)
+                    return Poll::Ready(self.reduce_batches()?)
                 }
             }));
         }
