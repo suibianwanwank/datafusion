@@ -388,7 +388,7 @@ impl WindowAggStream {
             &evaluate_batch.slice(0, last_range.start),
             result_batches,
         )?;
-        Ok(Some(result))
+        Ok(result)
     }
 
     fn reduce_batches(&mut self) -> Result<Option<Result<RecordBatch>>> {
@@ -398,7 +398,10 @@ impl WindowAggStream {
         
         let batch = concat_batches(&self.input.schema(), self.current_batch.iter())?;
         let results = vec![compute_window_aggregates(&self.window_expr, &batch)?];
-        Ok(Some(self.build_output_batch(&batch, results)))
+        if let Some(results) = self.build_output_batch(&batch, results)? {
+            return Ok(Some(Ok(results)));
+        }
+        return Ok(None)
     }
 
     /// Helper to build a `RecordBatch` from original columns and new window columns.
@@ -406,17 +409,24 @@ impl WindowAggStream {
         &self,
         original_batch: &RecordBatch,
         window_results: Vec<Vec<ArrayRef>>,
-    ) -> Result<RecordBatch> {
+    ) -> Result<Option<RecordBatch>> {
+        if original_batch.num_rows() == 0 {
+            return Ok(None);
+        }
         let window_columns = transpose(window_results)
             .into_iter()
-            .map(|cols| concat(&cols.iter().map(|a| a.as_ref()).collect::<Vec<_>>()))
+            .enumerate()
+            .map(|(i, cols)| {
+                concat(&cols.iter().map(|a| a.as_ref()).collect::<Vec<_>>())
+            })
             .collect::<Result<Vec<ArrayRef>, ArrowError>>()?;
 
         let mut combined_columns = original_batch.columns().to_vec();
         combined_columns.extend_from_slice(&window_columns);
 
-        RecordBatch::try_new(Arc::clone(&self.schema), combined_columns)
-            .map_err(Into::into)
+        let batch = RecordBatch::try_new(Arc::clone(&self.schema), combined_columns)
+            .map_err(|e| DataFusionError::from(e))?;
+        Ok(Some(batch))
     }
 }
 
