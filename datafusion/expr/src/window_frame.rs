@@ -298,6 +298,10 @@ impl WindowFrame {
     pub fn is_ever_expanding(&self) -> bool {
         self.start_bound.is_unbounded()
     }
+
+    pub fn is_unbounded(&self) -> bool {
+        self.start_bound.is_unbounded() && self.end_bound.is_unbounded()
+    }
 }
 
 /// There are five ways to describe starting and ending frame boundaries:

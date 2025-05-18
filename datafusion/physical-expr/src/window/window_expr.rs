@@ -18,6 +18,7 @@
 use std::any::Any;
 use std::fmt::Debug;
 use std::ops::Range;
+use std::process::id;
 use std::sync::Arc;
 
 use crate::{LexOrdering, PhysicalExpr};
@@ -32,7 +33,7 @@ use datafusion_common::{internal_err, DataFusionError, Result, ScalarValue};
 use datafusion_expr::window_state::{
     PartitionBatchState, WindowAggState, WindowFrameContext, WindowFrameStateGroups,
 };
-use datafusion_expr::{Accumulator, PartitionEvaluator, WindowFrame, WindowFrameBound};
+use datafusion_expr::{Accumulator, PartitionEvaluator, WindowFrame, WindowFrameBound, WindowFrameUnits};
 
 use indexmap::IndexMap;
 
@@ -283,34 +284,65 @@ pub trait AggregateWindowExpr: WindowExpr {
         let length = values[0].len();
         let mut row_wise_results: Vec<ScalarValue> = vec![];
         let is_causal = self.get_window_frame().is_causal();
-        while idx < length {
-            // Start search from the last_range. This squeezes searched range.
-            let cur_range =
-                window_frame_ctx.calculate_range(&order_bys, last_range, length, idx)?;
-            // Exit if the range is non-causal and extends all the way:
-            if cur_range.end == length
-                && !is_causal
-                && not_end
-                && !is_end_bound_safe(
+        if self.get_window_frame().units == WindowFrameUnits::Rows {
+            let start_bound = evaluate_rows_bound(&self.get_window_frame().start_bound, length - idx, idx);
+            let end_bound = evaluate_rows_bound(&self.get_window_frame().end_bound, length, idx);
+            for cur_range in start_bound.into_iter().zip(end_bound.into_iter()).map(|(start, end)| Range { start, end }) {
+                // Exit if the range is non-causal and extends all the way:
+                if cur_range.end == length
+                    && !is_causal
+                    && not_end
+                    && !is_end_bound_safe(
                     window_frame_ctx,
                     &order_bys,
                     most_recent_row_order_bys.as_deref(),
                     self.order_by(),
                     idx,
                 )?
-            {
-                break;
+                {
+                    break;
+                }
+                let value = self.get_aggregate_result_inside_range(
+                    last_range,
+                    &cur_range,
+                    &values,
+                    accumulator,
+                )?;
+                // Update last range
+                *last_range = cur_range;
+                row_wise_results.push(value);
+                idx += 1;
             }
-            let value = self.get_aggregate_result_inside_range(
-                last_range,
-                &cur_range,
-                &values,
-                accumulator,
-            )?;
-            // Update last range
-            *last_range = cur_range;
-            row_wise_results.push(value);
-            idx += 1;
+        } else {
+            while idx < length {
+                // Start search from the last_range. This squeezes searched range.
+                let cur_range =
+                    window_frame_ctx.calculate_range(&order_bys, last_range, length, idx)?;
+                // Exit if the range is non-causal and extends all the way:
+                if cur_range.end == length
+                    && !is_causal
+                    && not_end
+                    && !is_end_bound_safe(
+                    window_frame_ctx,
+                    &order_bys,
+                    most_recent_row_order_bys.as_deref(),
+                    self.order_by(),
+                    idx,
+                )?
+                {
+                    break;
+                }
+                let value = self.get_aggregate_result_inside_range(
+                    last_range,
+                    &cur_range,
+                    &values,
+                    accumulator,
+                )?;
+                // Update last range
+                *last_range = cur_range;
+                row_wise_results.push(value);
+                idx += 1;
+            }
         }
 
         if row_wise_results.is_empty() {
@@ -517,6 +549,27 @@ fn is_row_ahead(
     let current_value = ScalarValue::try_from_array(current_col, 0)?;
     let cmp = compare_rows(&[current_value], &[last_value], &[*sort_options])?;
     Ok(cmp.is_gt())
+}
+
+fn evaluate_rows_bound(bound: &WindowFrameBound, num_rows: usize, idx: usize) -> Vec<usize> {
+    match bound {
+        WindowFrameBound::Preceding(ScalarValue::UInt64(None)) => {
+            vec![0; num_rows]
+        }
+        WindowFrameBound::Preceding(ScalarValue::UInt64(Some(n))) => {
+            let n = *n as usize;
+            (idx..num_rows + idx).map(|i| i.saturating_sub(n)).collect()
+        }
+        WindowFrameBound::CurrentRow => (idx..num_rows + idx).collect(),
+        WindowFrameBound::Following(ScalarValue::UInt64(Some(n))) => {
+            let n = *n as usize;
+            (idx..num_rows + idx).map(|i| (i + n).min(num_rows)).collect()
+        }
+        WindowFrameBound::Following(ScalarValue::UInt64(None)) => {
+            vec![num_rows; num_rows]
+        }
+        _ => panic!("Unsupported frame bound in evaluate_rows_bound"),
+    }
 }
 
 /// Get order by expression results inside `order_by_columns`.
