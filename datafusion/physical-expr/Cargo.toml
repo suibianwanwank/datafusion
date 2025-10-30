@@ -57,6 +57,7 @@ petgraph = "0.8.3"
 arrow = { workspace = true, features = ["test_utils"] }
 criterion = { workspace = true }
 datafusion-functions = { workspace = true }
+datafusion-functions-nested = { workspace = true }
 insta = { workspace = true }
 rand = { workspace = true }
 rstest = { workspace = true }
@@ -76,3 +77,7 @@ name = "is_null"
 [[bench]]
 harness = false
 name = "binary_op"
+
+[[bench]]
+harness = false
+name = "array_function"
