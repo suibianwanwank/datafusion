@@ -2408,6 +2408,7 @@ dependencies = [
  "datafusion-expr-common",
  "datafusion-functions",
  "datafusion-functions-aggregate-common",
+ "datafusion-functions-nested",
  "datafusion-physical-expr-common",
  "half",
  "hashbrown 0.14.5",
