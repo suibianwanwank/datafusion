@@ -177,3 +177,29 @@ pub fn compare_op_for_nested(
         Ok(BooleanArray::new(values, nulls))
     }
 }
+
+/// Returns whether the [`Datum`] `lhs` contains values from `rhs`.
+pub fn contains_op<const ALL: bool, const NULL_EQUAL: bool>(
+    lhs: &dyn Datum,
+    rhs: &dyn Datum,
+) -> Result<bool> {
+    let (l, _) = lhs.get();
+    let (r, _) = rhs.get();
+
+    let cmp = make_comparator(l, r, SortOptions::default())?;
+
+    let equals = |i: usize, j: usize| {
+        if NULL_EQUAL {
+            cmp(i, j).is_eq() || (l.is_null(i) && r.is_null(j))
+        } else {
+            cmp(i, j).is_eq()
+        }
+    };
+
+    let value = if ALL {
+        (0..r.len()).all(|j| (0..l.len()).any(|i| equals(i, j)))
+    } else {
+        (0..r.len()).any(|j| (0..l.len()).any(|i| equals(i, j)))
+    };
+    Ok(value)
+}

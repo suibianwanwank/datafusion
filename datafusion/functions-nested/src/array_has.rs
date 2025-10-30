@@ -20,9 +20,7 @@
 use arrow::array::{Array, ArrayRef, BooleanArray, Datum, Scalar};
 use arrow::buffer::BooleanBuffer;
 use arrow::datatypes::DataType;
-use arrow::row::{RowConverter, Rows, SortField};
 use datafusion_common::cast::{as_fixed_size_list_array, as_generic_list_array};
-use datafusion_common::utils::string_utils::string_array_to_vec;
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{exec_err, DataFusionError, Result, ScalarValue};
 use datafusion_expr::expr::ScalarFunction;
@@ -31,7 +29,7 @@ use datafusion_expr::{
     in_list, ColumnarValue, Documentation, Expr, ScalarUDFImpl, Signature, Volatility,
 };
 use datafusion_macros::user_doc;
-use datafusion_physical_expr_common::datum::compare_with_eq;
+use datafusion_physical_expr_common::datum::{compare_with_eq, contains_op};
 use itertools::Itertools;
 
 use crate::make_array::make_array_udf;
@@ -291,14 +289,6 @@ impl<'a> ArrayWrapper<'a> {
         }
     }
 
-    fn value_type(&self) -> DataType {
-        match self {
-            ArrayWrapper::FixedSizeList(arr) => arr.value_type(),
-            ArrayWrapper::List(arr) => arr.value_type(),
-            ArrayWrapper::LargeList(arr) => arr.value_type(),
-        }
-    }
-
     fn offsets(&self) -> Box<dyn Iterator<Item = usize> + 'a> {
         match self {
             ArrayWrapper::FixedSizeList(arr) => {
@@ -388,49 +378,16 @@ fn array_has_all_inner(args: &[ArrayRef]) -> Result<ArrayRef> {
     array_has_all_and_any_inner(args, ComparisonType::All)
 }
 
-// General row comparison for array_has_all and array_has_any
-fn general_array_has_for_all_and_any<'a>(
-    haystack: &ArrayWrapper<'a>,
-    needle: &ArrayWrapper<'a>,
-    comparison_type: ComparisonType,
-) -> Result<ArrayRef> {
-    let mut boolean_builder = BooleanArray::builder(haystack.len());
-    let converter = RowConverter::new(vec![SortField::new(haystack.value_type())])?;
-
-    for (arr, sub_arr) in haystack.iter().zip(needle.iter()) {
-        if let (Some(arr), Some(sub_arr)) = (arr, sub_arr) {
-            let arr_values = converter.convert_columns(&[arr])?;
-            let sub_arr_values = converter.convert_columns(&[sub_arr])?;
-            boolean_builder.append_value(general_array_has_all_and_any_kernel(
-                arr_values,
-                sub_arr_values,
-                comparison_type,
-            ));
-        } else {
-            boolean_builder.append_null();
-        }
-    }
-
-    Ok(Arc::new(boolean_builder.finish()))
-}
-
 // String comparison for array_has_all and array_has_any
-fn array_has_all_and_any_string_internal<'a>(
+fn array_has_all_and_any_internal<'a, const ALL: bool>(
     haystack: &ArrayWrapper<'a>,
     needle: &ArrayWrapper<'a>,
-    comparison_type: ComparisonType,
 ) -> Result<ArrayRef> {
     let mut boolean_builder = BooleanArray::builder(haystack.len());
     for (arr, sub_arr) in haystack.iter().zip(needle.iter()) {
         match (arr, sub_arr) {
             (Some(arr), Some(sub_arr)) => {
-                let haystack_array = string_array_to_vec(&arr);
-                let needle_array = string_array_to_vec(&sub_arr);
-                boolean_builder.append_value(array_has_string_kernel(
-                    haystack_array,
-                    needle_array,
-                    comparison_type,
-                ));
+                boolean_builder.append_value(contains_op::<ALL, true>(&arr, &sub_arr)?);
             }
             (_, _) => {
                 boolean_builder.append_null();
@@ -453,11 +410,13 @@ fn array_has_all_and_any_dispatch<'a>(
         };
         Ok(Arc::new(BooleanArray::from(buffer)))
     } else {
-        match needle.value_type() {
-            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
-                array_has_all_and_any_string_internal(haystack, needle, comparison_type)
+        match comparison_type {
+            ComparisonType::All => {
+                array_has_all_and_any_internal::<true>(haystack, needle)
             }
-            _ => general_array_has_for_all_and_any(haystack, needle, comparison_type),
+            ComparisonType::Any => {
+                array_has_all_and_any_internal::<false>(haystack, needle)
+            }
         }
     }
 }
@@ -630,42 +589,6 @@ enum ComparisonType {
     All,
     // array_has_any
     Any,
-}
-
-fn array_has_string_kernel(
-    haystack: Vec<Option<&str>>,
-    needle: Vec<Option<&str>>,
-    comparison_type: ComparisonType,
-) -> bool {
-    match comparison_type {
-        ComparisonType::All => needle
-            .iter()
-            .dedup()
-            .all(|x| haystack.iter().dedup().any(|y| y == x)),
-        ComparisonType::Any => needle
-            .iter()
-            .dedup()
-            .any(|x| haystack.iter().dedup().any(|y| y == x)),
-    }
-}
-
-fn general_array_has_all_and_any_kernel(
-    haystack_rows: Rows,
-    needle_rows: Rows,
-    comparison_type: ComparisonType,
-) -> bool {
-    match comparison_type {
-        ComparisonType::All => needle_rows.iter().all(|needle_row| {
-            haystack_rows
-                .iter()
-                .any(|haystack_row| haystack_row == needle_row)
-        }),
-        ComparisonType::Any => needle_rows.iter().any(|needle_row| {
-            haystack_rows
-                .iter()
-                .any(|haystack_row| haystack_row == needle_row)
-        }),
-    }
 }
 
 #[cfg(test)]
