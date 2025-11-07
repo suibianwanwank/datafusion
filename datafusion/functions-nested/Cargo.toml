@@ -61,10 +61,15 @@ paste = "1.0.14"
 [dev-dependencies]
 criterion = { workspace = true, features = ["async_tokio"] }
 rand = { workspace = true }
+datafusion-physical-expr = { workspace = true }
 
 [[bench]]
 harness = false
 name = "array_expression"
+
+[[bench]]
+harness = false
+name = "array_has"
 
 [[bench]]
 harness = false
