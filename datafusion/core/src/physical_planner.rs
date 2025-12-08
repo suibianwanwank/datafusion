@@ -1445,11 +1445,7 @@ impl DefaultPhysicalPlanner {
             }
             LogicalPlan::CTE(CTE { name, .. }) => {
                 let [query, input] = children.two()?;
-                Arc::new(MaterializedCTEExec::try_new(
-                    name.clone(),
-                    query,
-                    input,
-                )?)
+                Arc::new(MaterializedCTEExec::try_new(name.clone(), query, input)?)
             }
             // N Children
             LogicalPlan::Union(_) => UnionExec::try_new(children.vec())?,

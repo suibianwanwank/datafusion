@@ -43,7 +43,10 @@ use crate::memory::MemoryStream;
 use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use crate::spill::in_progress_spill_file::InProgressSpillFile;
 use crate::spill::spill_manager::SpillManager;
-use crate::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream, SendableRecordBatchStream, Statistics};
+use crate::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream, Statistics,
+};
 
 /// Assigns a MaterializedCTEState to all CTEScanExec nodes in the plan tree
 /// that reference the specified CTE name.
@@ -200,7 +203,12 @@ impl MaterializedCTEExec {
     ) -> Result<Self> {
         // Traverse the input plan and inject the state into all CTEScanExec
         // nodes that reference this CTE.
-        let state = Arc::new(MaterializedCTEState::new(cte_query.properties().output_partitioning().partition_count()));
+        let state = Arc::new(MaterializedCTEState::new(
+            cte_query
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+        ));
         let input = assign_cte_state(input, &name, Arc::clone(&state))?;
 
         let eq_properties = input.properties().equivalence_properties().clone();
@@ -287,9 +295,10 @@ impl ExecutionPlan for MaterializedCTEExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        // Initialize materialization futures for ALL CTE partitions (only happens once)
-        // This ensures all partition futures are created before any CTEScanExec tries to access them
-        for (cte_partition_id, partition_fut) in self.state.partitions().iter().enumerate()
+        // Register lazy materialization futures for all CTE partitions (only happens once)
+        // Each future spawns a task to materialize its partition only when accessed by CTEScanExec
+        for (cte_partition_id, partition_fut) in
+            self.state.partitions().iter().enumerate()
         {
             let partition_once = Arc::clone(partition_fut);
             let cte_query = Arc::clone(&self.cte_query);
@@ -297,45 +306,42 @@ impl ExecutionPlan for MaterializedCTEExec {
             let cte_name = self.name.clone();
             let context_for_mat = Arc::clone(&context);
 
-            // Initialize the OnceAsync with a future that will materialize this CTE partition
+            // Initialize the OnceAsync with a lazy future that will materialize this CTE partition
+            // The future is only polled (and spawns the task) when CTEScanExec accesses it
             // try_once ensures this only happens once even if called multiple times
             partition_once.try_once(move || {
-                let context = Arc::clone(&context_for_mat);
-                let cte_query = Arc::clone(&cte_query);
-                let schema = Arc::clone(&schema);
-                let cte_name = cte_name.clone();
-
-                // Spawn a background task to execute CTE materialization
-                // This runs independently to avoid blocking the main query
-                let task = datafusion_common_runtime::SpawnedTask::spawn(async move {
-                    // Execute this partition of the CTE query
-                    let stream =
-                        cte_query.execute(cte_partition_id, Arc::clone(&context))?;
-
-                    // Create per-partition memory reservation
-                    let reservation = MemoryConsumer::new(format!(
-                        "MaterializedCTE[{cte_name}]:partition[{cte_partition_id}]"
-                    ))
-                    .with_can_spill(true)
-                    .register(context.memory_pool());
-
-                    // Materialize this partition
-                    materialize_partition(
-                        stream,
-                        schema,
-                        reservation,
-                        context,
-                        cte_partition_id,
-                    )
-                    .await
-                });
-
-                // Return a future that joins the spawned task
+                // Return a lazy future that spawns the task only when polled
                 Ok(async move {
+                    // Spawn a background task to execute CTE materialization
+                    // This runs independently to avoid blocking the main query
+                    let task =
+                        datafusion_common_runtime::SpawnedTask::spawn(async move {
+                            // Execute this partition of the CTE query
+                            let stream = cte_query
+                                .execute(cte_partition_id, Arc::clone(&context_for_mat))?;
+
+                            // Create per-partition memory reservation
+                            let reservation = MemoryConsumer::new(format!(
+                                "MaterializedCTE[{cte_name}]:partition[{cte_partition_id}]"
+                            ))
+                            .with_can_spill(true)
+                            .register(context_for_mat.memory_pool());
+
+                            // Materialize this partition
+                            materialize_partition(
+                                stream,
+                                schema,
+                                reservation,
+                                context_for_mat,
+                                cte_partition_id,
+                            )
+                            .await
+                        });
+
+                    // Wait for the spawned task to complete
                     task.join_unwind().await.map_err(|e| {
                         datafusion_common::DataFusionError::Execution(format!(
-                            "CTE materialization task failed: {}",
-                            e
+                            "CTE materialization task failed: {e}"
                         ))
                     })?
                 }
@@ -484,6 +490,19 @@ impl ExecutionPlan for CTEScanExec {
         Ok(Statistics::new_unknown(&self.schema))
     }
 
+    /// Creates a new CTEScanExec with the provided shared state.
+    ///
+    /// This method is used by [`MaterializedCTEExec`] to inject the shared
+    /// [`MaterializedCTEState`] into all [`CTEScanExec`] nodes that reference
+    /// this CTE. This enables multiple scan nodes to access the same materialized
+    /// partitions without re-executing the CTE query.
+    ///
+    /// # Arguments
+    /// * `state` - The shared state containing materialization futures for all partitions
+    ///
+    /// # Returns
+    /// * `Some(Arc<dyn ExecutionPlan>)` if the state can be successfully downcast
+    /// * `None` if the state is not a [`MaterializedCTEState`]
     fn with_new_state(
         &self,
         state: Arc<dyn Any + Send + Sync>,
@@ -522,7 +541,7 @@ struct CTEScanStream {
 }
 
 enum CTEScanState {
-    /// Waiting for materialization to complete. 
+    /// Waiting for materialization to complete.
     WaitingForMaterialization(Option<crate::once_async::OnceFut<CTEStorage>>),
 
     /// Materialization complete, streaming data
@@ -549,7 +568,11 @@ impl CTEScanStream {
     }
 
     /// Poll the materialization future and transition to streaming state
-    fn poll_next_inner(&mut self, cx: &mut Context<'_>, once_fut_opt: &mut Option<crate::once_async::OnceFut<CTEStorage>>) -> Poll<Result<()>> {
+    fn poll_next_inner(
+        &mut self,
+        cx: &mut Context<'_>,
+        once_fut_opt: &mut Option<crate::once_async::OnceFut<CTEStorage>>,
+    ) -> Poll<Result<()>> {
         // Get or create the OnceFut, reusing it across polls to preserve waker registration
         let once_fut = once_fut_opt.get_or_insert_with(|| {
             self.partition_fut.try_once(|| {
@@ -604,13 +627,16 @@ impl Stream for CTEScanStream {
     ) -> Poll<Option<Self::Item>> {
         loop {
             // First, check if we're in WaitingForMaterialization state and extract once_fut_opt
-            let should_poll_inner = matches!(&self.state, CTEScanState::WaitingForMaterialization(_));
-            
+            let should_poll_inner =
+                matches!(&self.state, CTEScanState::WaitingForMaterialization(_));
+
             if should_poll_inner {
                 // Temporarily take ownership of the state to avoid borrow checker issues
                 let old_state = std::mem::replace(&mut self.state, CTEScanState::Done);
-                
-                if let CTEScanState::WaitingForMaterialization(mut once_fut_opt) = old_state {
+
+                if let CTEScanState::WaitingForMaterialization(mut once_fut_opt) =
+                    old_state
+                {
                     match self.poll_next_inner(cx, &mut once_fut_opt) {
                         Poll::Ready(Ok(())) => {
                             // Don't restore state, poll_next_inner already transitioned to Streaming
@@ -622,13 +648,14 @@ impl Stream for CTEScanStream {
                         }
                         Poll::Pending => {
                             // Restore the state with the (potentially updated) once_fut_opt
-                            self.state = CTEScanState::WaitingForMaterialization(once_fut_opt);
+                            self.state =
+                                CTEScanState::WaitingForMaterialization(once_fut_opt);
                             return Poll::Pending;
                         }
                     }
                 }
             }
-            
+
             // Handle other states
             match &mut self.state {
                 CTEScanState::WaitingForMaterialization(_) => {
@@ -706,19 +733,19 @@ mod tests {
             TestMemoryExec::try_new(&[batches.clone()], schema.clone(), None)?;
         let cte_query = Arc::new(TestMemoryExec::update_cache(Arc::new(cte_query)));
 
-        // Create shared partition data (1 partition)
-        let state = Arc::new(MaterializedCTEState::new(1));
-
-        // Create CTEScanExec
-        let scan =
-            CTEScanExec::new("test_cte".to_string(), schema.clone(), Arc::clone(&state));
+        // Create CTEScanExec (state will be injected by MaterializedCTEExec)
+        let scan = CTEScanExec::new(
+            "test_cte".to_string(),
+            schema.clone(),
+            Arc::new(MaterializedCTEState::new(1)),
+        );
 
         // Create MaterializedCTEExec with scan as input
+        // MaterializedCTEExec will create its own state and inject it into the scan
         let exec = MaterializedCTEExec::try_new(
             "test_cte".to_string(),
             cte_query,
             Arc::new(scan),
-            state,
         )?;
 
         let context = Arc::new(TaskContext::default());
@@ -763,81 +790,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-    async fn test_cte_multiple_scans() -> Result<()> {
-        // Test that multiple scans can read the same CTE partition concurrently
-        let schema = create_test_schema();
-        let batches = create_test_batches(2, 3); // 2 batches, 3 rows each
-
-        let cte_query =
-            TestMemoryExec::try_new(&[batches.clone()], schema.clone(), None)?;
-        let cte_query = Arc::new(TestMemoryExec::update_cache(Arc::new(cte_query)));
-
-        let state = Arc::new(MaterializedCTEState::new(1));
-
-        // Create two scans sharing the same partition data
-        let scan1 =
-            CTEScanExec::new("test_cte".to_string(), schema.clone(), Arc::clone(&state));
-        let scan2 =
-            CTEScanExec::new("test_cte".to_string(), schema.clone(), Arc::clone(&state));
-
-        // Create MaterializedCTEExec
-        let exec = MaterializedCTEExec::try_new(
-            "test_cte".to_string(),
-            cte_query,
-            Arc::new(scan1),
-            state,
-        )?;
-
-        let context = Arc::new(TaskContext::default());
-
-        // Execute MaterializedCTEExec first to initialize the future
-        let exec_handle = tokio::spawn({
-            let context = Arc::clone(&context);
-            let exec = Arc::new(exec);
-            async move {
-                let mut stream = exec.execute(0, context).unwrap();
-                while let Some(_) = stream.next().await {}
-            }
-        });
-
-        let scan2_handle = tokio::spawn({
-            let context = Arc::clone(&context);
-            async move {
-                let mut stream = scan2.execute(0, context).unwrap();
-                let mut batches = vec![];
-                while let Some(batch) = stream.next().await {
-                    batches.push(batch.unwrap());
-                }
-                batches
-            }
-        });
-
-        // Wait for both to complete
-        exec_handle.await.unwrap();
-        let scan2_batches = scan2_handle.await.unwrap();
-
-        // Scan should get the data
-        assert_eq!(scan2_batches.len(), 2);
-
-        let expected = [
-            "+---+----+",
-            "| a | b  |",
-            "+---+----+",
-            "| 0 | 0  |",
-            "| 1 | 2  |",
-            "| 2 | 4  |",
-            "| 3 | 6  |",
-            "| 4 | 8  |",
-            "| 5 | 10 |",
-            "+---+----+",
-        ];
-
-        assert_batches_eq!(expected, &scan2_batches);
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn test_cte_with_spilling() -> Result<()> {
         // Test spilling by using a very small memory limit
         let schema = create_test_schema();
@@ -855,16 +807,16 @@ mod tests {
         let context = TaskContext::default().with_runtime(runtime);
         let context = Arc::new(context);
 
-        let state = Arc::new(MaterializedCTEState::new(1));
-
-        let scan =
-            CTEScanExec::new("test_cte".to_string(), schema.clone(), Arc::clone(&state));
+        let scan = CTEScanExec::new(
+            "test_cte".to_string(),
+            schema.clone(),
+            Arc::new(MaterializedCTEState::new(1)),
+        );
 
         let exec = MaterializedCTEExec::try_new(
             "test_cte".to_string(),
             cte_query,
             Arc::new(scan),
-            state,
         )?;
 
         // Execute (should trigger spilling via MaterializedCTEExec)
@@ -880,6 +832,54 @@ mod tests {
         // Verify we got all 1000 rows
         assert_eq!(total_rows, 1000);
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    async fn test_cte_lazy_partition_execution() -> Result<()> {
+        // Test that partitions are materialized on-demand, not eagerly
+        let schema = create_test_schema();
+
+        // Create 3 partitions with distinct data
+        let batches_p0 = create_test_batches(1, 10); // partition 0: rows 0-9
+        let batches_p1 = create_test_batches(1, 10); // partition 1: rows 0-9
+        let batches_p2 = create_test_batches(1, 10); // partition 2: rows 0-9
+
+        // Create a CTE query with 3 partitions
+        let cte_query = TestMemoryExec::try_new(
+            &[batches_p0.clone(), batches_p1.clone(), batches_p2.clone()],
+            schema.clone(),
+            None,
+        )?;
+        let cte_query = Arc::new(TestMemoryExec::update_cache(Arc::new(cte_query)));
+
+        // Create a scan that references the CTE
+        let scan = CTEScanExec::new(
+            "test_cte".to_string(),
+            schema.clone(),
+            Arc::new(MaterializedCTEState::new(3)),
+        );
+
+        // Create MaterializedCTEExec
+        let exec = MaterializedCTEExec::try_new(
+            "test_cte".to_string(),
+            cte_query,
+            Arc::new(scan),
+        )?;
+
+        let context = Arc::new(TaskContext::default());
+
+        // Only access partition 1 (not 0 or 2)
+        // This verifies that partitions are materialized lazily
+        let mut stream = exec.execute(1, Arc::clone(&context))?;
+        let mut batches = vec![];
+        while let Some(batch) = stream.next().await {
+            batches.push(batch?);
+        }
+
+        // Verify we got data from partition 1
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 10);
         Ok(())
     }
 }

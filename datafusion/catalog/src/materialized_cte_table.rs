@@ -31,20 +31,11 @@ use datafusion_common::Result;
 use datafusion_expr::{Expr, LogicalPlan, TableProviderFilterPushDown, TableType};
 use datafusion_physical_plan::cte::{CTEScanExec, MaterializedCTEState};
 
-/// A table provider for materialized CTEs
+/// Table provider for materialized CTEs.
 ///
-/// This provider returns a CTEScanExec when scanned. The CTEScanExec is initially
-/// created with a dummy state (1 partition), and the actual MaterializedCTEState
-/// with the correct partition count is injected later by the physical planner
-/// when processing the CTE node via assign_cte_state().
-///
-/// # Architecture
-///
-/// The physical planner creates:
-/// 1. One MaterializedCTEExec that materializes the CTE query
-/// 2. Multiple CTEScanExec instances (one per CTE reference) that read from it
-/// 3. All CTEScanExec instances are updated via assign_cte_state() to share the
-///    same MaterializedCTEState for coordination
+/// Returns a [`CTEScanExec`] when scanned. The initial scan has a dummy state,
+/// which is replaced by [`MaterializedCTEExec`] via `assign_cte_state()` to enable
+/// shared access to the materialized data across multiple CTE references.
 #[derive(Debug)]
 pub struct MaterializedCTETable {
     /// The name of the CTE
@@ -76,16 +67,16 @@ impl TableProvider for MaterializedCTETable {
         self
     }
 
-    fn get_logical_plan(&'_ self) -> Option<Cow<'_, LogicalPlan>> {
-        None
-    }
-
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.table_schema)
     }
 
     fn table_type(&self) -> TableType {
         TableType::Temporary
+    }
+
+    fn get_logical_plan(&'_ self) -> Option<Cow<'_, LogicalPlan>> {
+        None
     }
 
     async fn scan(
@@ -95,9 +86,7 @@ impl TableProvider for MaterializedCTETable {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        // Create a CTEScanExec with a dummy state (0 partition)
-        // The actual state with correct partition count will be injected later
-        // by the physical planner when processing the CTE node via assign_cte_state()
+        // Placeholder state; MaterializedCTEExec will inject the actual shared state
         Ok(Arc::new(CTEScanExec::new(
             self.name.clone(),
             Arc::clone(&self.table_schema),
@@ -109,7 +98,6 @@ impl TableProvider for MaterializedCTETable {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
-        // Filters are not pushed down to CTE; they are applied by FilterExec on top
         Ok(vec![
             TableProviderFilterPushDown::Unsupported;
             filters.len()
