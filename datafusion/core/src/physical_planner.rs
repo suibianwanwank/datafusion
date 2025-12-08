@@ -84,7 +84,7 @@ use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{
     Analyze, BinaryExpr, DescribeTable, DmlStatement, Explain, ExplainFormat, Extension,
     FetchType, Filter, JoinType, Operator, RecursiveQuery, SkipType, StringifiedPlan,
-    WindowFrame, WindowFrameBound, WriteOp,
+    WindowFrame, WindowFrameBound, WriteOp, CTE,
 };
 use datafusion_physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
 use datafusion_physical_expr::expressions::Literal;
@@ -102,6 +102,7 @@ use datafusion_physical_plan::unnest::ListUnnest;
 
 use async_trait::async_trait;
 use datafusion_physical_plan::async_func::{AsyncFuncExec, AsyncMapper};
+use datafusion_physical_plan::cte::MaterializedCTEExec;
 use futures::{StreamExt, TryStreamExt};
 use itertools::{multiunzip, Itertools};
 use log::debug;
@@ -1442,7 +1443,14 @@ impl DefaultPhysicalPlanner {
                     *is_distinct,
                 )?)
             }
-
+            LogicalPlan::CTE(CTE { name, .. }) => {
+                let [query, input] = children.two()?;
+                Arc::new(MaterializedCTEExec::try_new(
+                    name.clone(),
+                    query,
+                    input,
+                )?)
+            }
             // N Children
             LogicalPlan::Union(_) => UnionExec::try_new(children.vec())?,
             LogicalPlan::Extension(Extension { node }) => {

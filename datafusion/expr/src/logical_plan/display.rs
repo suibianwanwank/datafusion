@@ -24,7 +24,7 @@ use crate::{
     expr_vec_fmt, Aggregate, DescribeTable, Distinct, DistinctOn, DmlStatement, Expr,
     Filter, Join, Limit, LogicalPlan, Partitioning, Projection, RecursiveQuery,
     Repartition, Sort, Subquery, SubqueryAlias, TableProviderFilterPushDown, TableScan,
-    Unnest, Values, Window,
+    Unnest, Values, Window, CTE,
 };
 
 use crate::dml::CopyTo;
@@ -317,6 +317,12 @@ impl<'a, 'b> PgJsonVisitor<'a, 'b> {
                 json!({
                     "Node Type": "RecursiveQuery",
                     "Is Distinct": is_distinct,
+                })
+            }
+            LogicalPlan::CTE(CTE { name, .. }) => {
+                json!({
+                    "Node Type": "CTE",
+                    "name": name,
                 })
             }
             LogicalPlan::Values(Values { ref values, .. }) => {

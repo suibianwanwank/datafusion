@@ -19,12 +19,10 @@
 
 use std::cmp::{min, Ordering};
 use std::collections::HashSet;
-use std::fmt::{self, Debug};
-use std::future::Future;
+use std::fmt::Debug;
 use std::iter::once;
 use std::ops::Range;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use crate::joins::SharedBitmapBuilder;
 use crate::metrics::{self, BaselineMetrics, ExecutionPlanMetricsSet, MetricBuilder};
@@ -62,8 +60,7 @@ use datafusion_common::cast::as_boolean_array;
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::stats::Precision;
 use datafusion_common::{
-    not_impl_err, plan_err, DataFusionError, JoinSide, JoinType, NullEquality, Result,
-    SharedResult,
+    not_impl_err, plan_err, JoinSide, JoinType, NullEquality, Result,
 };
 use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::Operator;
@@ -75,9 +72,6 @@ use datafusion_physical_expr::{
 };
 
 use datafusion_physical_expr_common::datum::compare_op_for_nested;
-use futures::future::{BoxFuture, Shared};
-use futures::{ready, FutureExt};
-use parking_lot::Mutex;
 
 /// Checks whether the schemas "left" and "right" and columns "on" represent a valid join.
 /// They are valid whenever their columns' intersection equals the set `on`
@@ -327,76 +321,6 @@ pub fn build_join_schema(
         .collect();
 
     (fields.finish().with_metadata(metadata), column_indices)
-}
-
-/// A [`OnceAsync`] runs an `async` closure once, where multiple calls to
-/// [`OnceAsync::try_once`] return a [`OnceFut`] that resolves to the result of the
-/// same computation.
-///
-/// This is useful for joins where the results of one child are needed to proceed
-/// with multiple output stream
-///
-///
-/// For example, in a hash join, one input is buffered and shared across
-/// potentially multiple output partitions. Each output partition must wait for
-/// the hash table to be built before proceeding.
-///
-/// Each output partition waits on the same `OnceAsync` before proceeding.
-pub(crate) struct OnceAsync<T> {
-    fut: Mutex<Option<SharedResult<OnceFut<T>>>>,
-}
-
-impl<T> Default for OnceAsync<T> {
-    fn default() -> Self {
-        Self {
-            fut: Mutex::new(None),
-        }
-    }
-}
-
-impl<T> Debug for OnceAsync<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "OnceAsync")
-    }
-}
-
-impl<T: 'static> OnceAsync<T> {
-    /// If this is the first call to this function on this object, will invoke
-    /// `f` to obtain a future and return a [`OnceFut`] referring to this. `f`
-    /// may fail, in which case its error is returned.
-    ///
-    /// If this is not the first call, will return a [`OnceFut`] referring
-    /// to the same future as was returned by the first call - or the same
-    /// error if the initial call to `f` failed.
-    pub(crate) fn try_once<F, Fut>(&self, f: F) -> Result<OnceFut<T>>
-    where
-        F: FnOnce() -> Result<Fut>,
-        Fut: Future<Output = Result<T>> + Send + 'static,
-    {
-        self.fut
-            .lock()
-            .get_or_insert_with(|| f().map(OnceFut::new).map_err(Arc::new))
-            .clone()
-            .map_err(DataFusionError::Shared)
-    }
-}
-
-/// The shared future type used internally within [`OnceAsync`]
-type OnceFutPending<T> = Shared<BoxFuture<'static, SharedResult<Arc<T>>>>;
-
-/// A [`OnceFut`] represents a shared asynchronous computation, that will be evaluated
-/// once for all [`Clone`]'s, with [`OnceFut::get`] providing a non-consuming interface
-/// to drive the underlying [`Future`] to completion
-pub(crate) struct OnceFut<T> {
-    state: OnceFutState<T>,
-}
-
-impl<T> Clone for OnceFut<T> {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-        }
-    }
 }
 
 /// A shared state between statistic aggregators for a join
@@ -715,69 +639,6 @@ fn max_distinct_count(
             }
 
             result
-        }
-    }
-}
-
-enum OnceFutState<T> {
-    Pending(OnceFutPending<T>),
-    Ready(SharedResult<Arc<T>>),
-}
-
-impl<T> Clone for OnceFutState<T> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Pending(p) => Self::Pending(p.clone()),
-            Self::Ready(r) => Self::Ready(r.clone()),
-        }
-    }
-}
-
-impl<T: 'static> OnceFut<T> {
-    /// Create a new [`OnceFut`] from a [`Future`]
-    pub(crate) fn new<Fut>(fut: Fut) -> Self
-    where
-        Fut: Future<Output = Result<T>> + Send + 'static,
-    {
-        Self {
-            state: OnceFutState::Pending(
-                fut.map(|res| res.map(Arc::new).map_err(Arc::new))
-                    .boxed()
-                    .shared(),
-            ),
-        }
-    }
-
-    /// Get the result of the computation if it is ready, without consuming it
-    pub(crate) fn get(&mut self, cx: &mut Context<'_>) -> Poll<Result<&T>> {
-        if let OnceFutState::Pending(fut) = &mut self.state {
-            let r = ready!(fut.poll_unpin(cx));
-            self.state = OnceFutState::Ready(r);
-        }
-
-        // Cannot use loop as this would trip up the borrow checker
-        match &self.state {
-            OnceFutState::Pending(_) => unreachable!(),
-            OnceFutState::Ready(r) => Poll::Ready(
-                r.as_ref()
-                    .map(|r| r.as_ref())
-                    .map_err(DataFusionError::from),
-            ),
-        }
-    }
-
-    /// Get shared reference to the result of the computation if it is ready, without consuming it
-    pub(crate) fn get_shared(&mut self, cx: &mut Context<'_>) -> Poll<Result<Arc<T>>> {
-        if let OnceFutState::Pending(fut) = &mut self.state {
-            let r = ready!(fut.poll_unpin(cx));
-            self.state = OnceFutState::Ready(r);
-        }
-
-        match &self.state {
-            OnceFutState::Pending(_) => unreachable!(),
-            OnceFutState::Ready(r) => {
-                Poll::Ready(r.clone().map_err(DataFusionError::Shared))
-            }
         }
     }
 }
@@ -1852,15 +1713,13 @@ pub fn compare_join_arrays(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::pin::Pin;
 
     use super::*;
 
     use arrow::array::Int32Array;
     use arrow::datatypes::{DataType, Fields};
-    use arrow::error::{ArrowError, Result as ArrowResult};
     use datafusion_common::stats::Precision::{Absent, Exact, Inexact};
-    use datafusion_common::{arrow_datafusion_err, arrow_err, ScalarValue};
+    use datafusion_common::ScalarValue;
     use datafusion_physical_expr::PhysicalSortExpr;
 
     use rstest::rstest;
@@ -1904,39 +1763,6 @@ mod tests {
         )];
 
         assert!(check(&left, &right, on).is_err());
-    }
-
-    #[tokio::test]
-    async fn check_error_nesting() {
-        let once_fut = OnceFut::<()>::new(async {
-            arrow_err!(ArrowError::CsvError("some error".to_string()))
-        });
-
-        struct TestFut(OnceFut<()>);
-        impl Future for TestFut {
-            type Output = ArrowResult<()>;
-
-            fn poll(
-                mut self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-            ) -> Poll<Self::Output> {
-                match ready!(self.0.get(cx)) {
-                    Ok(()) => Poll::Ready(Ok(())),
-                    Err(e) => Poll::Ready(Err(e.into())),
-                }
-            }
-        }
-
-        let res = TestFut(once_fut).await;
-        let arrow_err_from_fut = res.expect_err("once_fut always return error");
-
-        let wrapped_err = DataFusionError::from(arrow_err_from_fut);
-        let root_err = wrapped_err.find_root();
-
-        let _expected =
-            arrow_datafusion_err!(ArrowError::CsvError("some error".to_owned()));
-
-        assert!(matches!(root_err, _expected))
     }
 
     #[test]

@@ -42,7 +42,7 @@ pub use plan::{
     DistinctOn, EmptyRelation, Explain, ExplainOption, Extension, FetchType, Filter,
     Join, JoinConstraint, JoinType, Limit, LogicalPlan, Partitioning, PlanType,
     Projection, RecursiveQuery, Repartition, SkipType, Sort, StringifiedPlan, Subquery,
-    SubqueryAlias, TableScan, ToStringifiedPlan, Union, Unnest, Values, Window,
+    SubqueryAlias, TableScan, ToStringifiedPlan, Union, Unnest, Values, Window, CTE,
 };
 pub use statement::{
     Deallocate, Execute, Prepare, SetVariable, Statement, TransactionAccessMode,

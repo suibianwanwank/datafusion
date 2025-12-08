@@ -78,6 +78,19 @@ pub trait ContextProvider {
         not_impl_err!("Recursive CTE is not implemented")
     }
 
+    /// Creates a table source for a materialized CTE
+    ///
+    /// This method creates a MaterializedCTETable that can be used to scan
+    /// the results of a materialized CTE. Each reference to a materialized CTE
+    /// gets its own table instance with its own broadcast receiver.
+    fn create_materialized_cte_table(
+        &self,
+        _name: &str,
+        _schema: SchemaRef,
+    ) -> Result<Arc<dyn TableSource>> {
+        not_impl_err!("Materialized CTE is not implemented")
+    }
+
     /// Return [`ExprPlanner`] extensions for planning expressions
     fn get_expr_planners(&self) -> &[Arc<dyn ExprPlanner>] {
         &[]

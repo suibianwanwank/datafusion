@@ -50,9 +50,10 @@ use crate::joins::piecewise_merge_join::utils::{
     build_visited_indices_map, is_existence_join, is_right_existence_join,
 };
 use crate::joins::utils::asymmetric_join_output_partitioning;
+use crate::once_async::{OnceAsync, OnceFut};
 use crate::{
     joins::{
-        utils::{build_join_schema, BuildProbeJoinMetrics, OnceAsync, OnceFut},
+        utils::{build_join_schema, BuildProbeJoinMetrics},
         SharedBitmapBuilder,
     },
     metrics::ExecutionPlanMetricsSet,

@@ -34,6 +34,8 @@ use arrow_schema::{DataType, FieldRef};
 use datafusion_catalog::information_schema::{
     InformationSchemaProvider, INFORMATION_SCHEMA,
 };
+#[cfg(feature = "sql")]
+use datafusion_catalog::materialized_cte_table::MaterializedCTETable;
 use datafusion_catalog::MemoryCatalogProviderList;
 use datafusion_catalog::{TableFunction, TableFunctionImpl};
 use datafusion_common::alias::AliasGenerator;
@@ -1758,6 +1760,14 @@ impl ContextProvider for SessionContextProvider<'_> {
         let table = Arc::new(crate::datasource::cte_worktable::CteWorkTable::new(
             name, schema,
         ));
+        Ok(provider_as_source(table))
+    }
+    fn create_materialized_cte_table(
+        &self,
+        name: &str,
+        schema: arrow::datatypes::SchemaRef,
+    ) -> datafusion_common::Result<Arc<dyn TableSource>> {
+        let table = Arc::new(MaterializedCTETable::new(name.to_string(), schema));
         Ok(provider_as_source(table))
     }
 

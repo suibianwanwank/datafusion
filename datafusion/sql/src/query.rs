@@ -25,7 +25,7 @@ use datafusion_expr::expr::{Sort, WildcardOptions};
 
 use datafusion_expr::select_expr::SelectExpr;
 use datafusion_expr::{
-    CreateMemoryTable, DdlStatement, Distinct, Expr, LogicalPlan, LogicalPlanBuilder,
+    CreateMemoryTable, DdlStatement, Distinct, Expr, LogicalPlan, LogicalPlanBuilder, CTE,
 };
 use sqlparser::ast::{
     Expr as SQLExpr, ExprWithAliasAndOrderBy, Ident, LimitClause, Offset, OffsetRows,
@@ -45,13 +45,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // It also inherits the CTEs from the outer query by cloning the outer planner context.
         let mut query_plan_context = outer_planner_context.clone();
         let planner_context = &mut query_plan_context;
+        let outer_cte_cnt = planner_context.get_materialized_ctes().len();
 
         if let Some(with) = query.with {
             self.plan_with_clause(with, planner_context)?;
         }
 
         let set_expr = *query.body;
-        let plan = match set_expr {
+        let mut plan = match set_expr {
             SetExpr::Select(mut select) => {
                 let select_into = select.into.take();
                 let plan =
@@ -81,6 +82,19 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 self.limit(plan, query.limit_clause, planner_context)
             }
         }?;
+
+        for (name, cte_query) in planner_context
+            .get_materialized_ctes()
+            .into_iter()
+            .skip(outer_cte_cnt)
+            .rev()
+        {
+            plan = LogicalPlan::CTE(CTE {
+                name,
+                query: cte_query,
+                input: Arc::new(plan),
+            });
+        }
 
         self.pipe_operators(plan, query.pipe_operators, planner_context)
     }

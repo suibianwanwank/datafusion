@@ -1807,6 +1807,9 @@ impl AsLogicalPlan for LogicalPlanNode {
                     ))),
                 })
             }
+            LogicalPlan::CTE(_) => Err(proto_error(
+                "LogicalPlan serde is not yet implemented for CTE",
+            )),
         }
     }
 }

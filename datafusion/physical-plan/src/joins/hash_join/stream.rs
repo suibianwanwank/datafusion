@@ -25,10 +25,9 @@ use std::task::Poll;
 
 use crate::joins::hash_join::exec::JoinLeftData;
 use crate::joins::hash_join::shared_bounds::SharedBoundsAccumulator;
-use crate::joins::utils::{
-    equal_rows_arr, get_final_indices_from_shared_bitmap, OnceFut,
-};
+use crate::joins::utils::{equal_rows_arr, get_final_indices_from_shared_bitmap};
 use crate::joins::PartitionMode;
+use crate::once_async::OnceFut;
 use crate::{
     handle_state,
     hash_utils::create_hashes,

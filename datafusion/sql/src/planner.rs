@@ -18,6 +18,8 @@
 //! [`SqlToRel`]: SQL Query Planner (produces [`LogicalPlan`] from SQL AST)
 use std::collections::HashMap;
 use std::str::FromStr;
+
+use indexmap::IndexMap;
 use std::sync::Arc;
 use std::vec;
 
@@ -259,6 +261,9 @@ pub struct PlannerContext {
     /// Map of CTE name to logical plan of the WITH clause.
     /// Use `Arc<LogicalPlan>` to allow cheap cloning
     ctes: HashMap<String, Arc<LogicalPlan>>,
+    /// Map of materialized CTE name to logical plan of the WITH MATERIALIZED clause.
+    /// Use `Arc<LogicalPlan>` to allow cheap cloning
+    materialized_ctes: IndexMap<String, Arc<LogicalPlan>>,
     /// The query schema of the outer query plan, used to resolve the columns in subquery
     outer_query_schema: Option<DFSchemaRef>,
     /// The joined schemas of all FROM clauses planned so far. When planning LATERAL
@@ -280,6 +285,7 @@ impl PlannerContext {
         Self {
             prepare_param_data_types: Arc::new(vec![]),
             ctes: HashMap::new(),
+            materialized_ctes: IndexMap::new(),
             outer_query_schema: None,
             outer_from_schema: None,
             create_table_schema: None,
@@ -372,6 +378,30 @@ impl PlannerContext {
     /// Remove the plan of CTE / Subquery for the specified name
     pub(super) fn remove_cte(&mut self, cte_name: &str) {
         self.ctes.remove(cte_name);
+    }
+
+    /// Insert a logical plan for a materialized CTE
+    pub fn insert_materialized_cte(
+        &mut self,
+        cte_name: impl Into<String>,
+        plan: LogicalPlan,
+    ) {
+        let cte_name = cte_name.into();
+        self.materialized_ctes.insert(cte_name, Arc::new(plan));
+    }
+
+    /// Return a plan for the Common Table Expression (CTE) / Subquery for the
+    /// specified name
+    pub fn get_materialized_cte(&self, cte_name: &str) -> Option<&LogicalPlan> {
+        self.materialized_ctes.get(cte_name).map(|cte| cte.as_ref())
+    }
+
+    /// Get all materialized CTE plans
+    pub fn get_materialized_ctes(&self) -> Vec<(String, Arc<LogicalPlan>)> {
+        self.materialized_ctes
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::clone(v)))
+            .collect()
     }
 }
 

@@ -291,6 +291,8 @@ pub enum LogicalPlan {
     Unnest(Unnest),
     /// A variadic query (e.g. "Recursive CTEs")
     RecursiveQuery(RecursiveQuery),
+    /// Non-recursive CTE for calculating common plan
+    CTE(CTE),
 }
 
 impl Default for LogicalPlan {
@@ -355,6 +357,7 @@ impl LogicalPlan {
                 // we take the schema of the static term as the schema of the entire recursive query
                 static_term.schema()
             }
+            LogicalPlan::CTE(CTE { input, .. }) => input.schema(),
         }
     }
 
@@ -477,6 +480,7 @@ impl LogicalPlan {
                 recursive_term,
                 ..
             }) => vec![static_term, recursive_term],
+            LogicalPlan::CTE(CTE { query, input, .. }) => vec![query, input],
             LogicalPlan::Statement(stmt) => stmt.inputs(),
             // plans without inputs
             LogicalPlan::TableScan { .. }
@@ -567,6 +571,7 @@ impl LogicalPlan {
             LogicalPlan::RecursiveQuery(RecursiveQuery { static_term, .. }) => {
                 static_term.head_output_expr()
             }
+            LogicalPlan::CTE(CTE { input, .. }) => input.head_output_expr(),
             LogicalPlan::Union(union) => Ok(Some(Expr::Column(Column::from(
                 union.schema.qualified_field(0),
             )))),
@@ -737,6 +742,7 @@ impl LogicalPlan {
                 Ok(LogicalPlan::Distinct(distinct))
             }
             LogicalPlan::RecursiveQuery(_) => Ok(self),
+            LogicalPlan::CTE(_) => Ok(self),
             LogicalPlan::Analyze(_) => Ok(self),
             LogicalPlan::Explain(_) => Ok(self),
             LogicalPlan::TableScan(_) => Ok(self),
@@ -1076,6 +1082,15 @@ impl LogicalPlan {
                     is_distinct: *is_distinct,
                 }))
             }
+            LogicalPlan::CTE(CTE { name, .. }) => {
+                self.assert_no_expressions(expr)?;
+                let (query, input) = self.only_two_inputs(inputs)?;
+                Ok(LogicalPlan::CTE(CTE {
+                    name: name.clone(),
+                    query: Arc::new(query),
+                    input: Arc::new(input),
+                }))
+            }
             LogicalPlan::Analyze(a) => {
                 self.assert_no_expressions(expr)?;
                 let input = self.only_input(inputs)?;
@@ -1358,6 +1373,7 @@ impl LogicalPlan {
             LogicalPlan::TableScan(TableScan { fetch, .. }) => *fetch,
             LogicalPlan::EmptyRelation(_) => Some(0),
             LogicalPlan::RecursiveQuery(_) => None,
+            LogicalPlan::CTE(cte) => cte.input.max_rows(),
             LogicalPlan::Subquery(_) => None,
             LogicalPlan::SubqueryAlias(SubqueryAlias { input, .. }) => input.max_rows(),
             LogicalPlan::Limit(limit) => match limit.get_fetch_type() {
@@ -1753,6 +1769,10 @@ impl LogicalPlan {
                     }) => {
                         write!(f, "RecursiveQuery: is_distinct={is_distinct}")
                     }
+                    LogicalPlan::CTE(CTE {
+                        name, .. }) => {
+                        write!(f, "CTE: name={name}")
+                    }
                     LogicalPlan::Values(Values { ref values, .. }) => {
                         let str_values: Vec<_> = values
                             .iter()
@@ -2122,6 +2142,20 @@ pub struct RecursiveQuery {
     /// Should the output of the recursive term be deduplicated (`UNION`) or
     /// not (`UNION ALL`).
     pub is_distinct: bool,
+}
+
+/// Materialized CTE (Common Table Expression).
+///
+/// Represents a WITH clause that materializes the CTE query once and allows
+/// the main query to reference it multiple times without re-execution.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct CTE {
+    /// Name of the CTE
+    pub name: String,
+    /// CTE query definition
+    pub query: Arc<LogicalPlan>,
+    /// Main query that uses the CTE
+    pub input: Arc<LogicalPlan>,
 }
 
 /// Values expression. See

@@ -1058,3 +1058,83 @@ explain WITH RECURSIVE numbers AS (
   UNION ALL
   select n + 1 FROM numbers WHERE N < 10
 ) select * from numbers;
+
+statement ok
+set datafusion.sql_parser.dialect = 'Postgres';
+
+query TT
+EXPLAIN WITH
+  a AS MATERIALIZED (
+    SELECT a as a0 FROM t WHERE a > 0
+  ),
+  b AS MATERIALIZED (
+    SELECT a0 as a1 FROM a WHERE a0 < 3
+  )
+SELECT *
+FROM a
+LEFT JOIN b ON a.a0 = b.a1 order by a0, a1;
+----
+logical_plan
+01)CTE: name=a
+02)--SubqueryAlias: a
+03)----Projection: t.a AS a0
+04)------Filter: t.a > Int64(0)
+05)--------TableScan: t
+06)--CTE: name=b
+07)----SubqueryAlias: b
+08)------Projection: a.a0 AS a1
+09)--------Filter: a.a0 < Int64(3)
+10)----------TableScan: a
+11)----Sort: a.a0 ASC NULLS LAST, b.a1 ASC NULLS LAST
+12)------Projection: a.a0, b.a1
+13)--------Left Join: a.a0 = b.a1
+14)----------TableScan: a
+15)----------TableScan: b
+physical_plan
+01)MaterializedCTEExec: name=a
+02)--RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+03)----ProjectionExec: expr=[a@0 as a0]
+04)------CoalesceBatchesExec: target_batch_size=8182
+05)--------FilterExec: a@0 > 0
+06)----------DataSourceExec: partitions=1, partition_sizes=[1]
+07)--MaterializedCTEExec: name=b
+08)----ProjectionExec: expr=[a0@0 as a1]
+09)------CoalesceBatchesExec: target_batch_size=8182
+10)--------FilterExec: a0@0 < 3
+11)----------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=4
+12)------------CooperativeExec
+13)--------------CTEScanExec: name=a
+14)----RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+15)------SortPreservingMergeExec: [a0@0 ASC NULLS LAST, a1@1 ASC NULLS LAST]
+16)--------SortExec: expr=[a0@0 ASC NULLS LAST, a1@1 ASC NULLS LAST], preserve_partitioning=[true]
+17)----------CoalesceBatchesExec: target_batch_size=8182
+18)------------HashJoinExec: mode=Partitioned, join_type=Left, on=[(a0@0, a1@0)]
+19)--------------CoalesceBatchesExec: target_batch_size=8182
+20)----------------RepartitionExec: partitioning=Hash([a0@0], 4), input_partitions=4
+21)------------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=4
+22)--------------------CooperativeExec
+23)----------------------CTEScanExec: name=a
+24)--------------CoalesceBatchesExec: target_batch_size=8182
+25)----------------RepartitionExec: partitioning=Hash([a1@0], 4), input_partitions=4
+26)------------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=4
+27)--------------------CooperativeExec
+28)----------------------CTEScanExec: name=b
+
+query II
+WITH
+  a AS MATERIALIZED (
+    SELECT a as a0 FROM t WHERE a > 0
+  ),
+  b AS MATERIALIZED (
+    SELECT a0 as a1 FROM a WHERE a0 < 3
+  )
+SELECT *
+FROM a
+LEFT JOIN b ON a.a0 = b.a1 order by a0, a1;
+----
+1 1
+2 2
+3 NULL
+
+statement ok
+set datafusion.sql_parser.dialect = 'Generic';

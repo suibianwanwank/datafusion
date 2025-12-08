@@ -33,12 +33,12 @@ use crate::execution_plan::{boundedness_from_children, EmissionType};
 use crate::joins::utils::{
     build_join_schema, check_join_is_valid, estimate_join_statistics,
     need_produce_right_in_final, BuildProbeJoinMetrics, ColumnIndex, JoinFilter,
-    OnceAsync, OnceFut,
 };
 use crate::joins::SharedBitmapBuilder;
 use crate::metrics::{
     Count, ExecutionPlanMetricsSet, MetricBuilder, MetricType, MetricsSet, RatioMetrics,
 };
+use crate::once_async::{OnceAsync, OnceFut};
 use crate::projection::{
     try_embed_projection, try_pushdown_through_join, EmbeddedProjection, JoinData,
     ProjectionExec,

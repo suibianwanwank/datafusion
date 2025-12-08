@@ -22,8 +22,7 @@ use std::{any::Any, sync::Arc, task::Poll};
 
 use super::utils::{
     adjust_right_output_partitioning, reorder_output_after_swap, BatchSplitter,
-    BatchTransformer, BuildProbeJoinMetrics, NoopBatchTransformer, OnceAsync, OnceFut,
-    StatefulStreamResult,
+    BatchTransformer, BuildProbeJoinMetrics, NoopBatchTransformer, StatefulStreamResult,
 };
 use crate::execution_plan::{boundedness_from_children, EmissionType};
 use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet};
@@ -37,6 +36,7 @@ use crate::{
     SendableRecordBatchStream, Statistics,
 };
 
+use crate::once_async::{OnceAsync, OnceFut};
 use arrow::array::{RecordBatch, RecordBatchOptions};
 use arrow::compute::concat_batches;
 use arrow::datatypes::{Fields, Schema, SchemaRef};

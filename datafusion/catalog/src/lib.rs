@@ -35,6 +35,7 @@ pub mod cte_worktable;
 pub mod default_table_source;
 pub mod information_schema;
 pub mod listing_schema;
+pub mod materialized_cte_table;
 pub mod memory;
 pub mod stream;
 pub mod streaming;

@@ -42,7 +42,7 @@ use crate::{
     Distinct, DistinctOn, DmlStatement, Execute, Explain, Expr, Extension, Filter, Join,
     Limit, LogicalPlan, Partitioning, Prepare, Projection, RecursiveQuery, Repartition,
     Sort, Statement, Subquery, SubqueryAlias, TableScan, Union, Unnest,
-    UserDefinedLogicalNode, Values, Window,
+    UserDefinedLogicalNode, Values, Window, CTE,
 };
 use datafusion_common::tree_node::TreeNodeRefContainer;
 
@@ -337,6 +337,11 @@ impl TreeNode for LogicalPlan {
                     })
                 },
             ),
+            LogicalPlan::CTE(CTE { name, query, input }) => (query, input)
+                .map_elements(f)?
+                .update_data(|(query, input)| {
+                    LogicalPlan::CTE(CTE { name, query, input })
+                }),
             LogicalPlan::Statement(stmt) => match stmt {
                 Statement::Prepare(p) => p
                     .input
@@ -464,6 +469,7 @@ impl LogicalPlan {
             // plans without expressions
             LogicalPlan::EmptyRelation(_)
             | LogicalPlan::RecursiveQuery(_)
+            | LogicalPlan::CTE(_)
             | LogicalPlan::Subquery(_)
             | LogicalPlan::SubqueryAlias(_)
             | LogicalPlan::Analyze(_)
@@ -644,6 +650,7 @@ impl LogicalPlan {
             LogicalPlan::EmptyRelation(_)
             | LogicalPlan::Unnest(_)
             | LogicalPlan::RecursiveQuery(_)
+            | LogicalPlan::CTE(_)
             | LogicalPlan::Subquery(_)
             | LogicalPlan::SubqueryAlias(_)
             | LogicalPlan::Analyze(_)

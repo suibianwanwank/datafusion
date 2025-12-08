@@ -356,6 +356,7 @@ fn optimize_projections(
                 .collect::<Result<Vec<_>>>()?
         }
         LogicalPlan::EmptyRelation(_)
+        | LogicalPlan::CTE(_)
         | LogicalPlan::Values(_)
         | LogicalPlan::DescribeTable(_) => {
             // These operators have no inputs, so stop the optimization process.

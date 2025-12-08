@@ -25,7 +25,7 @@ use datafusion_common::{
     Result,
 };
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, TableSource};
-use sqlparser::ast::{Query, SetExpr, SetOperator, With};
+use sqlparser::ast::{CteAsMaterialized, Query, SetExpr, SetOperator, With};
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(super) fn plan_with_clause(
@@ -55,7 +55,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             // projection (e.g. "WITH table(t1, t2) AS SELECT 1, 2").
             let final_plan = self.apply_table_alias(cte_plan, cte.alias)?;
             // Export the CTE to the outer query
-            planner_context.insert_cte(cte_name, final_plan);
+
+            if matches!(cte.materialized, Some(CteAsMaterialized::Materialized))
+                && !is_recursive
+            {
+                planner_context.insert_materialized_cte(cte_name.clone(), final_plan);
+            } else {
+                planner_context.insert_cte(cte_name.clone(), final_plan);
+            }
         }
         Ok(())
     }
