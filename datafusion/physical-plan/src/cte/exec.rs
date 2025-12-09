@@ -41,8 +41,10 @@ use super::state::{CTEStorage, MaterializedCTEState, MaterializedPartitionFut};
 use crate::execution_plan::{Boundedness, EmissionType};
 use crate::memory::MemoryStream;
 use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet};
-use crate::spill::in_progress_spill_file::InProgressSpillFile;
-use crate::spill::spill_manager::SpillManager;
+use crate::spill::{
+    get_record_batch_memory_size, in_progress_spill_file::InProgressSpillFile,
+    spill_manager::SpillManager,
+};
 use crate::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
@@ -62,16 +64,13 @@ fn assign_cte_state(
         if let Some(cte_scan) = plan.as_any().downcast_ref::<CTEScanExec>() {
             if cte_scan.name() == cte_name {
                 // Use with_new_state to create a new CTEScanExec with the provided state
-                // Wrap state in Arc for passing through with_new_state
                 if let Some(new_plan) =
                     plan.with_new_state(Arc::clone(&state) as Arc<dyn Any + Send + Sync>)
                 {
-                    // eprintln!("Plan with new state, state partition len:{}", state.partitions().len());
                     return Ok(Transformed::yes(new_plan));
                 }
             }
         }
-        // Not a matching CTEScanExec, continue traversing
         Ok(Transformed::no(plan))
     })
     .data()
@@ -91,13 +90,11 @@ impl MaterializationState {
         self,
         batch: RecordBatch,
         reservation: &mut MemoryReservation,
-        schema: &SchemaRef,
-        context: &Arc<TaskContext>,
-        partition_id: usize,
+        spill_manager: &SpillManager,
     ) -> Result<Self> {
         match self {
             Self::InMemory(mut batches) => {
-                let batch_size = batch.get_array_memory_size();
+                let batch_size = get_record_batch_memory_size(&batch);
 
                 // Try to reserve memory for this batch
                 if reservation.try_grow(batch_size).is_ok() {
@@ -106,14 +103,7 @@ impl MaterializationState {
                 }
 
                 // Memory exhausted - transition to spilling
-                let metrics = ExecutionPlanMetricsSet::new();
-                let spill_metrics =
-                    crate::metrics::SpillMetrics::new(&metrics, partition_id);
-                let spill_manager = SpillManager::new(
-                    context.runtime_env(),
-                    spill_metrics,
-                    Arc::clone(schema),
-                );
+                let spill_manager = spill_manager.clone();
                 let mut in_progress = spill_manager.create_in_progress_file("CTE")?;
 
                 // Write all previously buffered batches
@@ -156,13 +146,15 @@ async fn materialize_partition(
     schema: SchemaRef,
     mut reservation: MemoryReservation,
     context: Arc<TaskContext>,
-    partition_id: usize,
+    spill_metrics: crate::metrics::SpillMetrics,
 ) -> Result<CTEStorage> {
     let mut state = MaterializationState::InMemory(Vec::new());
+    let spill_manager =
+        SpillManager::new(context.runtime_env(), spill_metrics, Arc::clone(&schema));
 
     while let Some(batch) = input.next().await.transpose()? {
         state = state
-            .try_buffer_or_spill(batch, &mut reservation, &schema, &context, partition_id)
+            .try_buffer_or_spill(batch, &mut reservation, &spill_manager)
             .await?;
     }
 
@@ -305,6 +297,8 @@ impl ExecutionPlan for MaterializedCTEExec {
             let schema = self.cte_query.schema();
             let cte_name = self.name.clone();
             let context_for_mat = Arc::clone(&context);
+            let spill_metrics =
+                crate::metrics::SpillMetrics::new(&self.metrics, cte_partition_id);
 
             // Initialize the OnceAsync with a lazy future that will materialize this CTE partition
             // The future is only polled (and spawns the task) when CTEScanExec accesses it
@@ -333,7 +327,7 @@ impl ExecutionPlan for MaterializedCTEExec {
                                 schema,
                                 reservation,
                                 context_for_mat,
-                                cte_partition_id,
+                                spill_metrics,
                             )
                             .await
                         });
